@@ -1,5 +1,4 @@
 from PIL import Image #opening,extracting or for pixel data from images,used in line 39
-from tkinter import filedialog
 import hashlib #sha256 will be in hashlib
 import textwrap #breaking hexadecimal key into small chunks
 import cv2 #decomposing into blue green red
@@ -8,8 +7,9 @@ from scipy.integrate import odeint #for chaotic sequences used in line 249
 import matplotlib.pyplot as plt 
 from bisect import bisect_left as bsearch #indexing sequences generated from chaotic dta
 import threading
-import tkinter as tk #filedialog and interacting with user
 import os
+import json 
+
 
 
 ''' 
@@ -73,7 +73,7 @@ def update_lorentz (key): #converts hash into binary and splits binary hash into
 
 def decompose_matrix(iname):#reads image data using open cv and splits data into r g b
     image = cv2.imread(iname)#image will contain in bgr sequence
-    blue,green,red = split_into_rgb_channels(image) #image data will be splitted into blue green red channels
+    blue,green,red = split_into_rgb_channels(image)
     for values, channel in zip((red, green, blue), (2,1,0)):
         img = np.zeros((values.shape[0], values.shape[1]), dtype = np.uint8)#empty block img will be created with the size same as the channel being processed
         img[:,:] = (values)
@@ -154,8 +154,8 @@ def dna_encode(b,g,r):
         [b'A' b'A' b'G' ... b'C' b'G' b'G']]
 '''
 
-def key_matrix_encode(key,b): #creates encoded matrix based on key and blue unlike previous one
-    b = np.unpackbits(b,axis=1)
+def key_matrix_encode(key,b): #creates encoded matrix based on key unlike previous one
+    b = np.unpackbits(b,axis=1)#b is passed as parameter just to get size of matrix
     m,n = b.shape
     key_bin = bin(int(key, 16))[2:].zfill(256)
     Mk = np.zeros((m,n),dtype=np.uint8)
@@ -187,7 +187,7 @@ def key_matrix_encode(key,b): #creates encoded matrix based on key and blue unli
 
 '''
 
-def xor_operation(b,g,r,mk):#does xor operation between dna encoded rgb channels and encoded key matrix 
+def xor_operation(b,g,r,mk): #xor between encodes bgr and mk which increases more randomness(stronger encryption)
     m,n = b.shape
     bx=np.chararray((m,n))
     gx=np.chararray((m,n))
@@ -235,10 +235,10 @@ def gen_chaos_seq(m,n):
     x= np.array((m,n*4))
     y= np.array((m,n*4))
     z= np.array((m,n*4))
-    t = np.linspace(0, tmax, N)
-    f = odeint(lorenz, (x0, y0, z0), t, args=(a, b, c))
-    x, y, z = f.T
-    x=x[:(N)]# x [1.44921875 1.4356917  1.42322731 ... 4.04847794 4.0138754  3.97998775]
+    t = np.linspace(0, tmax, N)   # array of time values ranging from 0 to tmax with n points
+    f = odeint(lorenz, (x0, y0, z0), t, args=(a, b, c))    #odeint is for integrating differential eqs
+    x, y, z = f.T   #.T is transpose operation so it changes from (N,3)to(3,N)
+    x=x[:(N)]       # x [1.44921875 1.4356917  1.42322731 ... 4.04847794 4.0138754  3.97998775]
     y=y[:(N)]
     z=z[:(N)]
     return x,y,z
@@ -291,7 +291,7 @@ def scramble(fx,fy,fz,b,r,g):#scrambles rgb channels
     bx_s=np.chararray((size))
     gx_s=np.chararray((size))
     rx_s=np.chararray((size))
-
+    #based on indices from fx,fy,fz the matrices bx etc will be rearranged 
     for i in range(size):
             idx = fz[i]
             bx_s[i] = bx[idx]
@@ -342,50 +342,86 @@ def recover_image(b, g, r, iname, counter):
     img[:,:,2] = r
     img[:,:,1] = g
     img[:,:,0] = b
-    cv2.imwrite(f"enc_{counter}.jpg", img)
-    print(f"Saved encrypted image as enc_{counter}.jpg")
+
+    file_name = os.path.splitext(os.path.basename(iname))[0]
+    encrypted_folder = "encryptedimages"
+
+    if not os.path.exists(encrypted_folder):
+        os.makedirs(encrypted_folder)
+
+    encrypted_file_path = os.path.join(encrypted_folder, f"encrypted_{file_name}.png")
+    cv2.imwrite(encrypted_file_path, img)
+    print(f"Saved encrypted image as {encrypted_file_path}")
     return img
 
 
 
+def save_encryption_info(file_name, fx, fy, fz, Mk_e, red):
+    encryption_info = {
+        'fx': fx.tolist(),
+        'fy': fy.tolist(),
+        'fz': fz.tolist(),
+        'Mk_e': Mk_e.tolist(),
+        'red': red.tolist()
+    }
+    return encryption_info
 
-def process_image(file_path, counter):
-    key, m, n = securekey(file_path) #generates a hash from pixel data 
-    update_lorentz(key)
-    blue, green, red = decompose_matrix(file_path)#splits the image into red blue and green channels
-    blue_e, green_e, red_e = dna_encode(blue, green, red)#
-    Mk_e = key_matrix_encode(key, blue)
-    blue_final, green_final, red_final = xor_operation(blue_e, green_e, red_e, Mk_e)
-    x, y, z = gen_chaos_seq(m, n)
-    fx, fy, fz = sequence_indexing(x, y, z)
-    blue_scrambled, green_scrambled, red_scrambled = scramble(fx, fy, fz, blue_final, red_final, green_final)
-    b, g, r = dna_decode(blue_scrambled, green_scrambled, red_scrambled)
-    img = recover_image(b, g, r, file_path, counter)
-    print(f"Image encrypted in Thread {counter}")
-    return img
 
-def process_images_in_folder(folder_path):
+
+
+def process_images_in_folder(folder_path, passwords_array):
     threads = []
     counter = 0
-    for file_name in os.listdir(folder_path):
+    encryption_info = {}
+    
+    def process_image(file_path, password):
+        nonlocal counter
+        key, m, n = securekey(file_path)
+        update_lorentz(key)
+        blue, green, red = decompose_matrix(file_path)
+        blue_e, green_e, red_e = dna_encode(blue, green, red)
+        Mk_e = key_matrix_encode(key, blue)
+        blue_final, green_final, red_final = xor_operation(blue_e, green_e, red_e, Mk_e)
+        x, y, z = gen_chaos_seq(m, n)
+        fx, fy, fz = sequence_indexing(x, y, z)
+        blue_scrambled, green_scrambled, red_scrambled = scramble(fx, fy, fz, blue_final, red_final, green_final)
+        b, g, r = dna_decode(blue_scrambled, green_scrambled, red_scrambled)
+        img = recover_image(b, g, r, file_path, counter)
+        
+        encryption_info[password] = {
+            'fx': fx.tolist(),
+            'fy': fy.tolist(),
+            'fz': fz.tolist(),
+            'Mk_e': Mk_e.tolist(),
+            'red': red.tolist()
+        }
+        print(f"Image encrypted in Thread {counter}")
+        counter += 1
+
+    for file_name, password in passwords_array:
         file_path = os.path.join(folder_path, file_name)
         if os.path.isfile(file_path) and file_name.lower().endswith(('.jpg', '.jpeg', '.png')):
-            thread = threading.Thread(target=process_image, args=(file_path, counter))
+            thread = threading.Thread(target=process_image, args=(file_path, password))
             threads.append(thread)
-            counter += 1
-    
+
     for thread in threads:
         thread.start()
     
     for thread in threads:
         thread.join()
 
-def select_folder():
-    root = tk.Tk()
-    root.withdraw()
-    folder_path = filedialog.askdirectory(title="Select Folder")
-    return folder_path
+    with open("encrypted_data.json", 'w') as info_file:
+        json.dump(encryption_info, info_file)
+
+import sys
+import subprocess
 
 if __name__ == "__main__":
-    folder_path = select_folder()
-    process_images_in_folder(folder_path)
+    if len(sys.argv) > 2:
+        folder_path = sys.argv[1]
+        passwords_json = sys.argv[2]
+        passwords_array = json.loads(passwords_json)
+        process_images_in_folder(folder_path, passwords_array)
+        subprocess.run(["python", "upload.py"], check=True)
+    else:
+        print("Please provide a folder path.")
